@@ -1,7 +1,8 @@
-package bot
+package watch
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"regexp"
@@ -15,6 +16,11 @@ import (
 const (
 	mainBucketName      = "watches"
 	watchTypeBucketName = "type"
+)
+
+// errors
+var (
+	ErrorUnknownType = errors.New("unknown watch type")
 )
 
 // GetWatchesFromDB Creates a slice of watch instances from the databse
@@ -61,7 +67,7 @@ func watchFromBucket(b *bbolt.Bucket, id uint64) (Watch, error) {
 	case "goRe":
 		return goReWatchFromBucket(b, id)
 	default:
-		return nil, fmt.Errorf("unknown type %s", typ)
+		return nil, fmt.Errorf("%w: %s", ErrorUnknownType, typ)
 	}
 }
 
@@ -79,9 +85,10 @@ const (
 	WatchKill
 	WatchBan
 	WatchDelayBan
+	// TODO WatchRunCommand
 )
 
-var watchMap = map[actionType]string{
+var actionTypeMap = map[actionType]string{
 	WatchWarn:     "warn",
 	WatchExclude:  "exclude",
 	WatchKill:     "kill",
@@ -149,16 +156,42 @@ func (w watchFlag) String() string {
 // IsEnabled Returns whether or not the given bit (or mask) is enabled
 func (w watchFlag) IsEnabled(b watchFlag) bool { return w&b == b }
 
+// Watch represents a watch implementation
+type Watch interface {
+	matches(e *WatchEvent) bool
+	Type() actionType
+	ID() uint64
+	Temp() bool
+	LogStr() string
+}
+
 // BaseWatch contains data common to all watches.
 type BaseWatch struct {
 	actionType actionType
 	id         uint64
 	flags      watchFlag
 	temp       bool
+	reason     string
 }
 
 func (b *BaseWatch) String() string {
-	return fmt.Sprintf("Base watch %d with action %s (%s)", b.id, watchMap[b.actionType], b.flags)
+	return fmt.Sprintf("Base watch %d with action %s (%s)", b.id, actionTypeMap[b.actionType], b.flags)
+}
+
+func (b *BaseWatch) Type() actionType { return b.actionType }
+
+func (b *BaseWatch) ID() uint64 { return b.id }
+
+func (b *BaseWatch) Temp() bool { return b.temp }
+func (b *BaseWatch) LogStr() string {
+	out := &strings.Builder{}
+	idStr := fmt.Sprint(b.id)
+	if b.temp {
+		idStr = "TEMP"
+	}
+
+	fmt.Fprintf(out, "(%s:%s)", idStr, actionTypeMap[b.Type()])
+	return out.String()
 }
 
 func baseWatchFromBucket(b *bbolt.Bucket, id uint64) *BaseWatch {
@@ -166,11 +199,6 @@ func baseWatchFromBucket(b *bbolt.Bucket, id uint64) *BaseWatch {
 	typ := binary.BigEndian.Uint64(b.Get([]byte(watchTypeBucket)))
 
 	return &BaseWatch{actionType: actionType(typ), id: id}
-}
-
-// Watch represents a watch implementation
-type Watch interface {
-	matches(e *WatchEvent) bool
 }
 
 type goReWatch struct {
@@ -200,5 +228,10 @@ func goReWatchFromBucket(b *bbolt.Bucket, id uint64) (*goReWatch, error) {
 }
 
 func (w *goReWatch) matches(e *WatchEvent) bool {
-	return w.re.MatchString(e.user.Nick) || w.re.MatchString(e.user.Ident) || w.re.MatchString(e.user.Host) || w.re.MatchString(e.user.VisibleHost) || w.re.MatchString(e.user.Gecos)
+	return (w.re.MatchString(e.user.Nick) || w.re.MatchString(e.user.Ident) || w.re.MatchString(e.user.Host) ||
+		w.re.MatchString(e.user.VisibleHost) || w.re.MatchString(e.user.Gecos))
+}
+
+func (w *goReWatch) LogStr() string {
+	return fmt.Sprintf("%s /%q/%s", w.BaseWatch.LogStr(), w.re, w.flags.String())
 }
